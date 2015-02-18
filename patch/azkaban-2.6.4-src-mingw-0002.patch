@@ -1,0 +1,261 @@
+diff -uN -r azkaban-2.6.4-src/azkaban-common/src/main/java/azkaban/jobExecutor/ProcessJob.java azkaban-2.6.4-mingw-src/azkaban-common/src/main/java/azkaban/jobExecutor/ProcessJob.java
+--- azkaban-2.6.4-src/azkaban-common/src/main/java/azkaban/jobExecutor/ProcessJob.java	Wed Dec 24 04:25:55 2014
++++ azkaban-2.6.4-mingw-src/azkaban-common/src/main/java/azkaban/jobExecutor/ProcessJob.java	Wed Feb 18 17:39:21 2015
+@@ -69,8 +69,12 @@
+ 
+     for (String command : commands) {
+       info("Command: " + command);
++      String[] pcl = partitionCommandLine(command);
++      StringBuilder sb = new StringBuilder();
++      for (String s : pcl) sb.append(s + " ! ");
++      debug("  partialed in [" + sb.toString() + "]");
+       AzkabanProcessBuilder builder =
+-          new AzkabanProcessBuilder(partitionCommandLine(command))
++          new AzkabanProcessBuilder(pcl)
+               .setEnv(envVars).setWorkingDir(getCwd()).setLogger(getLog());
+ 
+       if (builder.getEnv().size() > 0) {
+diff -uN -r azkaban-2.6.4-src/azkaban-common/src/main/java/azkaban/jobExecutor/utils/process/AzkabanProcess.java azkaban-2.6.4-mingw-src/azkaban-common/src/main/java/azkaban/jobExecutor/utils/process/AzkabanProcess.java
+--- azkaban-2.6.4-src/azkaban-common/src/main/java/azkaban/jobExecutor/utils/process/AzkabanProcess.java	Wed Dec 24 04:25:55 2014
++++ azkaban-2.6.4-mingw-src/azkaban-common/src/main/java/azkaban/jobExecutor/utils/process/AzkabanProcess.java	Wed Feb 18 17:48:58 2015
+@@ -30,6 +30,7 @@
+ import org.apache.log4j.Logger;
+ 
+ import azkaban.utils.LogGobbler;
++import azkaban.utils.FileIOUtils;
+ 
+ import com.google.common.base.Joiner;
+ 
+@@ -140,6 +141,7 @@
+    */
+   public int getProcessId() {
+     checkStarted();
++    this.processId = this.processId < 1 ? -1 : this.processId;
+     return this.processId;
+   }
+ 
+@@ -153,8 +155,9 @@
+   public boolean softKill(final long time, final TimeUnit unit)
+       throws InterruptedException {
+     checkStarted();
+-    if (processId != 0 && isStarted()) {
++    if (processId > 0 && isStarted()) {
+       try {
++        // TODO: taskkill.exe should be used on Windows.
+         Runtime.getRuntime().exec("kill " + processId);
+         return completeLatch.await(time, unit);
+       } catch (IOException e) {
+@@ -171,8 +174,9 @@
+   public void hardKill() {
+     checkStarted();
+     if (isRunning()) {
+-      if (processId != 0) {
++      if (processId > 0) {
+         try {
++          // TODO: taskkill.exe should be used on Windows.
+           Runtime.getRuntime().exec("kill -9 " + processId);
+         } catch (IOException e) {
+           logger.error("Kill attempt failed.", e);
+@@ -196,7 +200,11 @@
+ 
+       processId = f.getInt(process);
+     } catch (Throwable e) {
+-      e.printStackTrace();
++      if (FileIOUtils.isWindows()) {
++        logger.info("Process class does not support 'pid' field on Windows.");
++      } else {
++        e.printStackTrace();
++      }
+     }
+ 
+     return processId;
+diff -uN -r azkaban-2.6.4-src/azkaban-common/src/main/java/azkaban/utils/FileIOUtils.java azkaban-2.6.4-mingw-src/azkaban-common/src/main/java/azkaban/utils/FileIOUtils.java
+--- azkaban-2.6.4-src/azkaban-common/src/main/java/azkaban/utils/FileIOUtils.java	Wed Dec 24 04:25:55 2014
++++ azkaban-2.6.4-mingw-src/azkaban-common/src/main/java/azkaban/utils/FileIOUtils.java	Wed Feb 18 17:38:08 2015
+@@ -39,6 +39,11 @@
+  */
+ public class FileIOUtils {
+ 
++  public static boolean isWindows() {
++    String osName = System.getProperty("os.name");
++    return osName.indexOf("Windows") >= 0;
++  }
++
+   public static class PrefixSuffixFileFilter implements FileFilter {
+     private String prefix;
+     private String suffix;
+@@ -106,12 +111,19 @@
+       File sourceLink = new File(sourceDir, path);
+       path = "." + path;
+ 
+-      buffer.append("ln -s ").append(sourceLink.getAbsolutePath()).append("/*")
++      if (isWindows()) {
++        buffer.append("copy /y ").append(sourceLink.getAbsolutePath()).append("\\*.*")
++          .append(" ").append(path);
++      } else {
++        buffer.append("ln -s ").append(sourceLink.getAbsolutePath()).append("/*")
+           .append(" ").append(path).append(";");
++      }
+     }
+ 
+     String command = buffer.toString();
+-    ProcessBuilder builder = new ProcessBuilder().command("sh", "-c", command);
++    ProcessBuilder builder = isWindows() ?
++      new ProcessBuilder().command("cmd","/c", command) :
++      new ProcessBuilder().command("sh", "-c", command);
+     builder.directory(destDir);
+ 
+     // XXX what about stopping threads ??
+diff -uN -r azkaban-2.6.4-src/azkaban-execserver/src/package/bin/azkaban-executor-start.sh azkaban-2.6.4-mingw-src/azkaban-execserver/src/package/bin/azkaban-executor-start.sh
+--- azkaban-2.6.4-src/azkaban-execserver/src/package/bin/azkaban-executor-start.sh	Wed Dec 24 04:25:55 2014
++++ azkaban-2.6.4-mingw-src/azkaban-execserver/src/package/bin/azkaban-executor-start.sh	Wed Feb 18 17:38:08 2015
+@@ -2,6 +2,13 @@
+ 
+ azkaban_dir=$(dirname $0)/..
+ 
++. $azkaban_dir/bin/pathfix
++
++case `uname -s` in
++MINGW*) MINGW=1 ;;
++CYGWIN*) CYGWIN=1 ;;
++esac
++
+ if [[ -z "$tmpdir" ]]; then
+ tmpdir=/tmp
+ fi
+@@ -34,6 +41,9 @@
+         CLASSPATH=$CLASSPATH:$HIVE_HOME/conf:$HIVE_HOME/lib/*
+ fi
+ 
++if [ "$MINGW" -o "$CYGWIN" ]; then
++  CLASSPATH=`pathfix $CLASSPATH`
++fi
+ echo $azkaban_dir;
+ echo $CLASSPATH;
+ 
+diff -uN -r azkaban-2.6.4-src/azkaban-execserver/src/package/bin/pathfix azkaban-2.6.4-mingw-src/azkaban-execserver/src/package/bin/pathfix
+--- azkaban-2.6.4-src/azkaban-execserver/src/package/bin/pathfix	Thu Jan  1 09:00:00 1970
++++ azkaban-2.6.4-mingw-src/azkaban-execserver/src/package/bin/pathfix	Wed Feb 18 17:38:08 2015
+@@ -0,0 +1,5 @@
++
++pathfix() {
++  pf=`echo $1|sed -e 's/^[cC]:/\/c\//;s/:[cC]:/:\/c\//g;s/:/;/g;s/\/c\//c:\\\\/g;s/\//\\\\/g;s/\\\\\\\\/\\\\/g'`
++  echo $pf
++}
+diff -uN -r azkaban-2.6.4-src/azkaban-soloserver/src/package/bin/azkaban-solo-start.sh azkaban-2.6.4-mingw-src/azkaban-soloserver/src/package/bin/azkaban-solo-start.sh
+--- azkaban-2.6.4-src/azkaban-soloserver/src/package/bin/azkaban-solo-start.sh	Wed Dec 24 04:25:55 2014
++++ azkaban-2.6.4-mingw-src/azkaban-soloserver/src/package/bin/azkaban-solo-start.sh	Wed Feb 18 17:38:08 2015
+@@ -2,6 +2,13 @@
+ 
+ azkaban_dir=$(dirname $0)/..
+ 
++. $azkaban_dir/bin/pathfix
++
++case `uname -s` in
++MINGW*) MINGW=1 ;;
++CYGWIN*) CYGWIN=1 ;;
++esac
++
+ if [[ -z "$tmpdir" ]]; then
+ tmpdir=/tmp
+ fi
+@@ -34,6 +41,9 @@
+         CLASSPATH=$CLASSPATH:$HIVE_HOME/conf:$HIVE_HOME/lib/*
+ fi
+ 
++if [ "$MINGW" -o "$CYGWIN" ]; then
++  CLASSPATH=`pathfix $CLASSPATH`
++fi
+ echo $azkaban_dir;
+ echo $CLASSPATH;
+ 
+diff -uN -r azkaban-2.6.4-src/azkaban-soloserver/src/package/bin/pathfix azkaban-2.6.4-mingw-src/azkaban-soloserver/src/package/bin/pathfix
+--- azkaban-2.6.4-src/azkaban-soloserver/src/package/bin/pathfix	Thu Jan  1 09:00:00 1970
++++ azkaban-2.6.4-mingw-src/azkaban-soloserver/src/package/bin/pathfix	Wed Feb 18 17:38:08 2015
+@@ -0,0 +1,5 @@
++
++pathfix() {
++  pf=`echo $1|sed -e 's/^[cC]:/\/c\//;s/:[cC]:/:\/c\//g;s/:/;/g;s/\/c\//c:\\\\/g;s/\//\\\\/g;s/\\\\\\\\/\\\\/g'`
++  echo $pf
++}
+diff -uN -r azkaban-2.6.4-src/azkaban-webserver/src/main/java/azkaban/webapp/servlet/ProjectManagerServlet.java azkaban-2.6.4-mingw-src/azkaban-webserver/src/main/java/azkaban/webapp/servlet/ProjectManagerServlet.java
+--- azkaban-2.6.4-src/azkaban-webserver/src/main/java/azkaban/webapp/servlet/ProjectManagerServlet.java	Wed Dec 24 04:25:55 2014
++++ azkaban-2.6.4-mingw-src/azkaban-webserver/src/main/java/azkaban/webapp/servlet/ProjectManagerServlet.java	Wed Feb 18 17:38:08 2015
+@@ -1571,13 +1571,18 @@
+       }
+ 
+       File tempDir = Utils.createTempDir();
++      File archiveFile = null;
++      FileOutputStream fos = null;
+       OutputStream out = null;
+       try {
+         logger.info("Uploading file " + name);
+-        File archiveFile = new File(tempDir, name);
+-        out = new BufferedOutputStream(new FileOutputStream(archiveFile));
++        archiveFile = new File(tempDir, name);
++        fos = new FileOutputStream(archiveFile);
++        out = new BufferedOutputStream(fos);
+         IOUtils.copy(item.getInputStream(), out);
++        out.flush();
+         out.close();
++        fos.close();
+ 
+         Map<String, ValidationReport> reports =
+             projectManager.uploadProject(project, archiveFile, type, user,
+@@ -1620,11 +1625,17 @@
+         }
+         ret.put("error", "Installation Failed.<br>" + error);
+       } finally {
+-        if (tempDir.exists()) {
+-          FileUtils.deleteDirectory(tempDir);
+-        }
+         if (out != null) {
++          out.flush();
+           out.close();
++        }
++        if (fos != null) fos.close();
++        if (tempDir.exists()) {
++          if (archiveFile != null && !FileUtils.deleteQuietly(archiveFile)) {
++            FileUtils.forceDeleteOnExit(archiveFile);
++          } else {
++            FileUtils.deleteDirectory(tempDir);
++          }
+         }
+       }
+ 
+diff -uN -r azkaban-2.6.4-src/azkaban-webserver/src/package/bin/azkaban-web-start.sh azkaban-2.6.4-mingw-src/azkaban-webserver/src/package/bin/azkaban-web-start.sh
+--- azkaban-2.6.4-src/azkaban-webserver/src/package/bin/azkaban-web-start.sh	Wed Dec 24 04:25:55 2014
++++ azkaban-2.6.4-mingw-src/azkaban-webserver/src/package/bin/azkaban-web-start.sh	Wed Feb 18 17:38:08 2015
+@@ -2,6 +2,13 @@
+ 
+ azkaban_dir=$(dirname $0)/..
+ 
++. $azkaban_dir/bin/pathfix
++
++case `uname -s` in
++MINGW*) MINGW=1 ;;
++CYGWIN*) CYGWIN=1 ;;
++esac
++
+ if [[ -z "$tmpdir" ]]; then
+ tmpdir=/tmp
+ fi
+@@ -34,6 +41,9 @@
+         CLASSPATH=$CLASSPATH:$HIVE_HOME/conf:$HIVE_HOME/lib/*
+ fi
+ 
++if [ "$MINGW" -o "$CYGWIN" ]; then
++  CLASSPATH=`pathfix $CLASSPATH`
++fi
+ echo $azkaban_dir;
+ echo $CLASSPATH;
+ 
+diff -uN -r azkaban-2.6.4-src/azkaban-webserver/src/package/bin/pathfix azkaban-2.6.4-mingw-src/azkaban-webserver/src/package/bin/pathfix
+--- azkaban-2.6.4-src/azkaban-webserver/src/package/bin/pathfix	Thu Jan  1 09:00:00 1970
++++ azkaban-2.6.4-mingw-src/azkaban-webserver/src/package/bin/pathfix	Wed Feb 18 17:38:08 2015
+@@ -0,0 +1,5 @@
++
++pathfix() {
++  pf=`echo $1|sed -e 's/^[cC]:/\/c\//;s/:[cC]:/:\/c\//g;s/:/;/g;s/\/c\//c:\\\\/g;s/\//\\\\/g;s/\\\\\\\\/\\\\/g'`
++  echo $pf
++}
