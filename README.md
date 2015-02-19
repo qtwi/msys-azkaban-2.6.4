@@ -3,14 +3,14 @@ azkaban 2.6.4 which runs with on msys/mingw over windows.
 no cygwin required.
 
 ## build
-download azkaban 2.6.4 source from the azkaban repository or clone.
+download azkaban 2.6.4 source from the azkaban repository or git clone.
 
 ```
 cd azkaban-2.6.4
 patch -u -p1 < .../azkaban-2.6.4-src-mingw-0002.patch
 ```
 
-run git init and several git command if you have downloaded the source zip instead of clone.
+run git init and several git command if you have downloaded the source zip instead of git clone.
 
 ```
 git init
