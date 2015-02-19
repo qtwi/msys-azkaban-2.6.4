@@ -1,6 +1,6 @@
 # msys-azkaban-2.6.4
 azkaban 2.6.4 which runs with on msys/mingw over windows.
-no cygwin required.
+no cygwin required. (it shouold work with cygwin.)
 
 ## build
 download azkaban 2.6.4 source from the azkaban repository or git clone.
